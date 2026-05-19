@@ -5,13 +5,13 @@
 **File:** `src/backend/MockEcommerce.Api/Services/InMemoryCartService.cs`
 
 Replace all `NotImplementedException` throws with working implementations:
-- `GetAll()` — return copy of `_cart` list under lock
-- `GetByProductId(int productId)` — find by ProductId under lock
-- `Add(CartItem item)` — if exists, increment quantity; if new, add to list. Return the item. Use lock for thread safety.
-- `Remove(int productId)` — find and remove, return bool. Use lock.
-- `Clear()` — clear list under lock.
+- `GetAll()` - return copy of `_cart` list under lock
+- `GetByProductId(int productId)` - find by ProductId under lock, return null if not found
+- `Add(CartItem item)` - under lock: if item with same ProductId exists, increment its Quantity by `item.Quantity`; if new, add to list. Return the cart item.
+- `Remove(int productId)` - find and remove under lock, return bool
+- `Clear()` - clear list under lock
 
-**Note:** The service layer does NOT enforce the max-quantity rule — that is the endpoint's responsibility (service stays generic).
+**Note:** The service layer does NOT enforce the max-quantity rule - that is the endpoint's responsibility. The service is a simple CRUD store.
 
 ---
 
@@ -19,22 +19,33 @@ Replace all `NotImplementedException` throws with working implementations:
 
 **File:** `src/backend/MockEcommerce.Api/Services/ICartService.cs`
 
-Add: `CartItem? Update(int productId, int quantity);`
+Add method to interface:
+```csharp
+/// <summary>
+/// Updates the quantity of an existing cart item.
+/// </summary>
+/// <param name="productId">The product ID to update.</param>
+/// <param name="quantity">The new absolute quantity.</param>
+/// <returns>The updated cart item, or null if the product is not in the cart.</returns>
+CartItem? Update(int productId, int quantity);
+```
 
 **File:** `src/backend/MockEcommerce.Api/Services/InMemoryCartService.cs`
 
-Implement `Update` — find item by productId, set its Quantity, return updated item (or null if not found).
+Implement `Update` - under lock: find item by productId, set its `Quantity` to the provided value, return updated item (or null if not found).
 
 ---
 
-## Step 3: Add UpdateCartItemRequest DTO
+## Step 3: Add UpdateCartItemRequest DTO and Refactor Handler Signatures
 
 **File:** `src/backend/MockEcommerce.Api/Endpoints/CartEndpoints.cs`
 
-Add record at bottom of file:
+Add record alongside existing `AddToCartRequest`:
 ```csharp
 public record UpdateCartItemRequest(int Quantity);
 ```
+
+**Important:** The existing handler signatures use typed results like `Results<Created<CartItem>, Ok<CartItem>, NotFound<string>, ValidationProblem>`. Since the spec requires custom JSON error bodies (`{ "error": "..." }`), change all cart handler return types to `IResult`. This allows using `Results.Json(new { error = "..." }, statusCode: 400)`.
 
 ---
 
@@ -42,39 +53,72 @@ public record UpdateCartItemRequest(int Quantity);
 
 **File:** `src/backend/MockEcommerce.Api/Endpoints/CartEndpoints.cs`
 
-Implement all handlers with validation:
-
-1. **GetCart** — call `cartService.GetAll()`, return `Ok(items)`
-2. **AddToCart** — validate quantity >= 1, look up product (404 if not found), check existing quantity + new <= 5 (400 if exceeded), call service Add, return 201 (new) or 200 (existing)
-3. **RemoveFromCart** — call `cartService.Remove(productId)`, return 204 or 404
-4. **ClearCart** — call `cartService.Clear()`, return 204
-
-Add new PUT endpoint in `MapCartEndpoints`:
+### 4a: Register PUT route in `MapCartEndpoints`
 ```csharp
 group.MapPut("/{productId:int}", UpdateCartItem)
     .WithName("UpdateCartItem")
     .WithSummary("Updates the quantity of an item in the cart.");
 ```
 
-5. **UpdateCartItem** — validate quantity >= 1 and <= 5 (400), call `cartService.Update(productId, quantity)`, return 200 or 404
+### 4b: Implement all handlers (all return `IResult`)
 
-All 400 responses use `Results.Json(new { error = "..." }, statusCode: 400)`.
+1. **GetCart** - `return Results.Ok(cartService.GetAll());`
+
+2. **AddToCart(AddToCartRequest request, IProductService productService, ICartService cartService)**
+   - If `request.Quantity < 1` then return `Results.Json(new { error = "Quantity must be at least 1" }, statusCode: 400)`
+   - If `request.Quantity > 5` then return `Results.Json(new { error = "Maximum quantity of 5 exceeded" }, statusCode: 400)`
+   - Look up product: `productService.GetById(request.ProductId)` - if null then return `Results.Json(new { error = "Product not found" }, statusCode: 404)`
+   - Check existing: `var existing = cartService.GetByProductId(request.ProductId)`
+   - If existing != null and `existing.Quantity + request.Quantity > 5` then return `Results.Json(new { error = "Maximum quantity of 5 exceeded" }, statusCode: 400)`
+   - Build CartItem: `new CartItem { ProductId = request.ProductId, ProductName = product.Name, UnitPrice = product.Price, Quantity = request.Quantity }`
+   - Call `var result = cartService.Add(item)`
+   - If existing was null then return `Results.Created($"/api/cart/{result.ProductId}", result)` (201)
+   - If existing was present then return `Results.Ok(result)` (200)
+
+3. **UpdateCartItem(int productId, UpdateCartItemRequest request, ICartService cartService)**
+   - If `request.Quantity < 1` then return 400 `{ "error": "Quantity must be at least 1" }`
+   - If `request.Quantity > 5` then return 400 `{ "error": "Maximum quantity of 5 exceeded" }`
+   - Call `var updated = cartService.Update(productId, request.Quantity)` - if null then return `Results.NotFound()` (404, empty body)
+   - Otherwise return `Results.Ok(updated)` (200)
+
+4. **RemoveFromCart(int productId, ICartService cartService)**
+   - `var removed = cartService.Remove(productId)` - if true: `Results.NoContent()`, if false: `Results.NotFound()`
+
+5. **ClearCart(ICartService cartService)**
+   - `cartService.Clear()` then return `Results.NoContent()`
+
+**Critical boundary rule: Use `> 5` checks (not `>= 5`). Exactly 5 is valid and must be accepted.**
 
 ---
 
-## Step 5: Add Frontend API Functions
-
-**File:** `src/frontend/src/api/index.ts`
-
-Add functions:
-- `fetchCart(): Promise<CartItem[]>` — GET /api/cart
-- `updateCartItem(productId: number, quantity: number): Promise<CartItem>` — PUT /api/cart/{productId}
-- `removeFromCart(productId: number): Promise<void>` — DELETE /api/cart/{productId}
-- `clearCart(): Promise<void>` — DELETE /api/cart
+## Step 5: Add Frontend Types and API Functions
 
 **File:** `src/frontend/src/types/index.ts`
 
-Add `CartItem` interface and `UpdateCartItemRequest` interface.
+Add:
+```typescript
+export interface CartItem {
+  productId: number;
+  productName: string;
+  unitPrice: number;
+  quantity: number;
+  totalPrice: number;
+}
+
+export interface UpdateCartItemRequest {
+  quantity: number;
+}
+```
+
+**File:** `src/frontend/src/api/index.ts`
+
+Add functions (following existing pattern of plain `fetch`, throw on non-ok):
+- `fetchCart(): Promise<CartItem[]>` - GET /api/cart
+- `updateCartItem(productId: number, quantity: number): Promise<CartItem>` - PUT /api/cart/{productId} with body `{ quantity }`
+- `removeFromCart(productId: number): Promise<void>` - DELETE /api/cart/{productId}
+- `clearCart(): Promise<void>` - DELETE /api/cart
+
+For 400 responses, parse the JSON body and throw an Error with the `error` field message so the UI can display it.
 
 ---
 
@@ -82,43 +126,64 @@ Add `CartItem` interface and `UpdateCartItemRequest` interface.
 
 **File:** `src/frontend/src/hooks/useCart.ts`
 
-Returns `{ cart, loading, error, refresh, updateItem, removeItem, clearAll }`.
-- Fetch cart on mount and expose `refresh` for re-fetching.
-- `updateItem` calls PUT, then refreshes.
-- `removeItem` calls DELETE, then refreshes.
-- `clearAll` calls DELETE /api/cart, then refreshes.
+```typescript
+interface UseCartResult {
+  cart: CartItem[];
+  loading: boolean;
+  error: string | null;
+  totalItems: number;
+  totalPrice: number;
+  refresh: () => void;
+  updateItem: (productId: number, quantity: number) => Promise<void>;
+  removeItem: (productId: number) => Promise<void>;
+  clearAll: () => Promise<void>;
+}
+```
+
+- Fetch cart on mount via `fetchCart()`.
+- `totalItems` = sum of all `item.quantity`.
+- `totalPrice` = sum of all `item.totalPrice`.
+- Action methods call API, then refresh. On failure, set error state with parsed message.
 
 ---
 
 ## Step 7: Create CartPanel Component
 
 **File:** `src/frontend/src/components/CartPanel/CartPanel.tsx`
-**File:** `src/frontend/src/components/CartPanel/index.ts`
+**File:** `src/frontend/src/components/CartPanel/index.ts` (barrel export)
 
-- Receives `onClose` prop and uses `useCart` hook internally.
-- Renders list of cart items with: product name, unit price, quantity dropdown (1–5), line total, remove button.
-- Shows grand total at bottom.
+Props: `{ onClose: () => void }` - uses `useCart` internally.
+
+UI structure:
+- Header row with "Shopping Cart" title and close button
+- Error banner (if error is non-null)
 - Empty state: "Your cart is empty."
-- "Clear cart" button.
-- Inline error display for failed operations.
+- Item list: each row has product name, unit price, `<select>` with options 1-5 for quantity, line total, remove button
+- Footer: grand total and "Clear cart" button
 
-Add styles to `src/frontend/src/App.css` using BEM (`.cart-panel`, `.cart-panel__item`, etc.).
+Quantity `<select>` onChange calls `updateItem(productId, parseInt(newValue))`.
+Remove button calls `removeItem(productId)`.
+Clear cart button calls `clearAll()`.
+
+**File:** `src/frontend/src/App.css`
+
+Add BEM styles: `.cart-panel`, `.cart-panel__header`, `.cart-panel__close`, `.cart-panel__error`, `.cart-panel__empty`, `.cart-panel__items`, `.cart-panel__item`, `.cart-panel__item-name`, `.cart-panel__item-price`, `.cart-panel__quantity`, `.cart-panel__item-total`, `.cart-panel__item-remove`, `.cart-panel__footer`, `.cart-panel__total`, `.cart-panel__clear-btn`.
 
 ---
 
-## Step 8: Integrate CartPanel into App
-
-**File:** `src/frontend/src/App.tsx`
-
-- Add `cartVisible` state toggled by header cart icon click.
-- Pass `onCartClick` callback to Header.
-- Conditionally render `<CartPanel>` when `cartVisible` is true.
-- Update `cartItemCount` from cart data (sum of quantities).
+## Step 8: Integrate CartPanel into App and Header
 
 **File:** `src/frontend/src/components/Header/Header.tsx`
 
-- Add `onCartClick` prop to `HeaderProps`.
-- Attach to cart button's `onClick`.
+- Add `onCartClick?: () => void` to `HeaderProps`.
+- Attach `onClick={onCartClick}` to the existing `<button className="header__cart-button">`.
+
+**File:** `src/frontend/src/App.tsx`
+
+- Add `const [cartVisible, setCartVisible] = useState(false)`.
+- Pass `onCartClick={() => setCartVisible(true)}` to `<Header>`.
+- Render `{cartVisible && <CartPanel onClose={() => setCartVisible(false)} />}`.
+- For the header badge `cartItemCount`: after `handleAddToCart` succeeds, increment local count (existing behavior). When CartPanel modifies the cart, the badge syncs on next panel open/close cycle.
 
 ---
 
@@ -126,30 +191,40 @@ Add styles to `src/frontend/src/App.css` using BEM (`.cart-panel`, `.cart-panel_
 
 **File:** `test/backend/MockEcommerce.Api.Tests/Services/InMemoryCartServiceTests.cs`
 
-Unit tests for InMemoryCartService:
-- GetAll returns empty initially
-- Add creates new item
-- Add increments existing item
-- GetByProductId returns correct item / null
-- Update sets quantity / returns null for missing
-- Remove returns true/false
-- Clear empties cart
+Unit tests:
+- `GetAll_ReturnsEmptyListInitially`
+- `Add_NewItem_AddsToCart`
+- `Add_ExistingItem_IncrementsQuantity`
+- `GetByProductId_ReturnsItem_WhenExists`
+- `GetByProductId_ReturnsNull_WhenNotExists`
+- `Update_SetsQuantity_WhenItemExists`
+- `Update_ReturnsNull_WhenItemNotInCart`
+- `Remove_ReturnsTrue_WhenItemExists`
+- `Remove_ReturnsFalse_WhenItemNotExists`
+- `Clear_RemovesAllItems`
 
 **File:** `test/backend/MockEcommerce.Api.Tests/Endpoints/CartEndpointTests.cs`
 
-Integration tests:
-- GET /api/cart returns 200 with empty array
-- POST /api/cart with valid data returns 201
-- POST /api/cart with quantity > 5 returns 400
-- POST /api/cart incrementing past 5 returns 400
-- POST /api/cart with invalid productId returns 404
-- PUT /api/cart/{id} with valid quantity returns 200
-- PUT /api/cart/{id} with quantity 0 returns 400
-- PUT /api/cart/{id} with quantity 6 returns 400
-- PUT /api/cart/{id} for item not in cart returns 404
-- DELETE /api/cart/{id} returns 204
-- DELETE /api/cart/{id} for missing item returns 404
-- DELETE /api/cart returns 204
+Integration tests (boundary tests for max quantity of 5 marked with *):
+- `GetCart_ReturnsOk_WithEmptyArray`
+- `AddToCart_ValidNewItem_Returns201`
+- `AddToCart_ExistingItem_Returns200_WithIncrementedQuantity`
+- * `AddToCart_Quantity5_NewItem_Returns201` (exactly 5 allowed)
+- * `AddToCart_Quantity6_Returns400` (above 5 rejected)
+- * `AddToCart_IncrementToExactly5_Returns200` (existing 3 + new 2 = 5)
+- * `AddToCart_IncrementPast5_Returns400` (existing 3 + new 3 = 6)
+- `AddToCart_InvalidProductId_Returns404`
+- `AddToCart_Quantity0_Returns400`
+- `AddToCart_NegativeQuantity_Returns400`
+- * `UpdateCartItem_Quantity5_Returns200` (exactly 5 allowed)
+- * `UpdateCartItem_Quantity6_Returns400` (above 5 rejected)
+- `UpdateCartItem_Quantity0_Returns400`
+- `UpdateCartItem_ValidQuantity3_Returns200`
+- `UpdateCartItem_ItemNotInCart_Returns404`
+- `RemoveFromCart_ExistingItem_Returns204`
+- `RemoveFromCart_NonExistentItem_Returns404`
+- `ClearCart_Returns204`
+- `ClearCart_WhenEmpty_Returns204`
 
 ---
 
@@ -157,15 +232,24 @@ Integration tests:
 
 **File:** `test/frontend/components/CartPanel/CartPanel.test.tsx`
 
-- Renders empty state
-- Renders cart items with correct data
-- Calls PUT on quantity change
-- Calls DELETE on remove click
-- Displays error messages on API failure
+- Renders "Your cart is empty." when cart has no items
+- Renders cart items with product name, unit price, quantity, and line total
+- Quantity select shows options 1 through 5
+- Changing quantity calls updateItem with correct args
+- Remove button calls removeItem with correct productId
+- "Clear cart" button calls clearAll
+- Error message displays when API fails
+- Grand total displays sum of line totals
 
 **File:** `test/frontend/hooks/useCart.test.ts`
 
-- Returns cart data after fetch
-- Handles loading/error states
-- refresh re-fetches data
+- Returns empty cart and loading=true initially
+- Returns fetched cart data after mount
+- Sets error on fetch failure
+- `refresh` re-fetches
+- `totalItems` sums quantities
+- `totalPrice` sums line totals
+- `updateItem` calls API then refreshes
+- `removeItem` calls API then refreshes
+- `clearAll` calls API then refreshes
 

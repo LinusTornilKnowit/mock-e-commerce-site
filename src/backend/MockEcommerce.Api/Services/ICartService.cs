@@ -25,6 +25,14 @@ public interface ICartService
     CartItem? GetByProductId(int productId);
 
     /// <summary>
+    /// Updates the quantity of an existing cart item.
+    /// </summary>
+    /// <param name="productId">The product ID to update.</param>
+    /// <param name="quantity">The new absolute quantity.</param>
+    /// <returns>The updated cart item, or <c>null</c> if the product is not in the cart.</returns>
+    CartItem? Update(int productId, int quantity);
+
+    /// <summary>
     /// Removes a cart item by product ID.
     /// </summary>
     /// <param name="productId">The product ID to remove.</param>

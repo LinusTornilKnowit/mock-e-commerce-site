@@ -3,6 +3,7 @@ import type { Product } from './types';
 import { Header } from './components/Header';
 import { HeroBanner } from './components/HeroBanner';
 import { ProductList } from './components/ProductList';
+import { CartPanel } from './components/CartPanel';
 import { useProducts } from './hooks/useProducts';
 import { addToCart } from './api';
 import './App.css';
@@ -11,6 +12,7 @@ export function App() {
   const { products, loading, error } = useProducts();
   const [cartMessage, setCartMessage] = useState<string | null>(null);
   const [cartItemCount, setCartItemCount] = useState(0);
+  const [cartVisible, setCartVisible] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -33,8 +35,10 @@ export function App() {
 
   return (
     <div className="app">
-      <Header cartItemCount={cartItemCount} />
+      <Header cartItemCount={cartItemCount} onCartClick={() => setCartVisible(true)} />
       <HeroBanner />
+
+      {cartVisible && <CartPanel onClose={() => setCartVisible(false)} />}
 
       <main className="app__main">
         <h1 className="app__section-heading">Our products</h1>
