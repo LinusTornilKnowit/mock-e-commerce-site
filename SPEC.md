@@ -10,8 +10,9 @@ Implement a fully functional shopping cart that allows users to view, add, updat
 
 | Ambiguity | Decision |
 |-----------|----------|
-| Max quantity on updates (PUT) | PUT sets the quantity to the value provided. If the value exceeds 5, return 400. The max applies to the absolute quantity, not an increment. |
-| Increment via POST when item already exists | POST increments existing quantity. If current (2) + requested (4) > 5, return 400 — do NOT silently cap. |
+| Max quantity on updates (PUT) | PUT sets the quantity to the value provided. If the value exceeds 5, return 400. Exactly 5 is allowed — only values > 5 are rejected (use `quantity > 5`, not `quantity >= 5`). |
+| Increment via POST when item already exists | POST increments existing quantity. If current + requested > 5, return 400 — do NOT silently cap. Exactly 5 is allowed (e.g., current 2 + requested 3 = 5 → OK). |
+| Quantity boundary (exactly 5) | A quantity of exactly 5 is valid and must be accepted for both POST and PUT. Only quantities strictly greater than 5 are rejected. Use `> 5` checks, never `>= 5`. |
 | PUT semantics | PUT replaces the quantity for an existing cart item. It does NOT create a new item — if the product is not in the cart, return 404. |
 | PUT with quantity 0 | Treated as invalid input — return 400 (use DELETE to remove). |
 | Error response format | All 400 errors return a JSON object: `{ "error": "<message>" }`. 404 returns empty body. |
